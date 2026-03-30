@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cv-analyzer"
+version = "0.1.0"
+description = "Cyclic Voltammetry Analysis Tool"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "openpyxl",
+]
+
+[project.scripts]
+cv-analyzer = "cv_analyzer.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["cv_analyzer*"]

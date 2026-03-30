@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lab-tools"
+version = "0.1.0"
+description = "A collection of tools for analyzing experimental laboratory data"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "openpyxl",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+# CLI entry points for all tools.
+# Add new tools here as they are developed.
+[project.scripts]
+cv-analyzer = "cv_analyzer.cli:main"
+
+# Discover Python packages inside each tool sub-directory.
+# To add a new tool, append its folder to the `where` list below and
+# add its entry point to [project.scripts].
+[tool.setuptools.packages.find]
+where = ["CV_Analysis"]
