@@ -68,20 +68,24 @@ def plot_cv(potential, current, result: CVResult,
             red_count += 1
             tag = f"Red{red_count}"
 
-        # Vertical dash-dot line at E_onset
+        # Vertical lines with clearly distinct styles:
+        #   E_onset : thin long-dash
+        #   Ep      : thick short-dash  (most important)
+        #   Ep/2    : thin dotted
         ax.axvline(
-            peak.onset_potential, color=color, linestyle="-.",
-            linewidth=1, alpha=0.7, zorder=3,
+            peak.onset_potential, color=color,
+            linestyle=(0, (8, 4)),       # long dash
+            linewidth=0.9, alpha=0.65, zorder=3,
         )
-        # Vertical dashed line at Ep
         ax.axvline(
-            peak.potential, color=color, linestyle="--",
-            linewidth=1, alpha=0.85, zorder=3,
+            peak.potential, color=color,
+            linestyle=(0, (4, 2)),       # short dash, dense
+            linewidth=1.6, alpha=0.9, zorder=3,
         )
-        # Vertical dotted line at Ep/2
         ax.axvline(
-            peak.half_peak_potential, color=color, linestyle=":",
-            linewidth=1, alpha=0.75, zorder=3,
+            peak.half_peak_potential, color=color,
+            linestyle=":",               # dotted
+            linewidth=0.9, alpha=0.65, zorder=3,
         )
 
         # Marker at peak apex
@@ -89,17 +93,17 @@ def plot_cv(potential, current, result: CVResult,
                 color=color, markersize=6, markeredgecolor="white",
                 markeredgewidth=0.6, zorder=5)
 
-        # Legend entries
-        legend_handles.append(Line2D([], [], color=color, linestyle="-.",
-                                     linewidth=1))
+        # Legend entries (matching the line styles above)
+        legend_handles.append(Line2D([], [], color=color,
+                                     linestyle=(0, (8, 4)), linewidth=0.9))
         legend_labels.append(f"{tag}  $E_{{onset}}$ = {peak.onset_potential:+.3f} V")
 
-        legend_handles.append(Line2D([], [], color=color, linestyle="--",
-                                     linewidth=1))
+        legend_handles.append(Line2D([], [], color=color,
+                                     linestyle=(0, (4, 2)), linewidth=1.6))
         legend_labels.append(f"{tag}  $E_p$ = {peak.potential:+.3f} V")
 
-        legend_handles.append(Line2D([], [], color=color, linestyle=":",
-                                     linewidth=1))
+        legend_handles.append(Line2D([], [], color=color,
+                                     linestyle=":", linewidth=0.9))
         legend_labels.append(f"{tag}  $E_{{p/2}}$ = {peak.half_peak_potential:+.3f} V")
 
         # Info-box text

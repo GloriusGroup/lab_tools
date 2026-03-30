@@ -56,8 +56,8 @@ if result.standard_potential is not None:
 # ---------------------------------------------------------------------------
 # 5. Generate plot and Excel export
 # ---------------------------------------------------------------------------
-out_dir = Path(__file__).parent / "output"
-out_dir.mkdir(exist_ok=True)
+out_dir = Path(__file__).parent / "output" / "irreversible"
+out_dir.mkdir(parents=True, exist_ok=True)
 
 file_metadata = extract_metadata(data_dir / "thioamide_2_1.csv", potential, current)
 

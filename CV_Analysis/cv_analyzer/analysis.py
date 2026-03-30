@@ -94,6 +94,40 @@ def subtract_blank(potential, current, blank_potential, blank_current):
 
 
 # ---------------------------------------------------------------------------
+# Local windowing for onset / Ep/2
+# ---------------------------------------------------------------------------
+
+def _local_pre_peak_window(potential, smoothed, peak_idx, max_v=1.0):
+    """Return a local window of the pre-peak region.
+
+    Limits the lookback to at most *max_v* volts from the peak potential,
+    so that baseline fits use data near the actual peak rather than
+    the far end of a long segment.
+
+    Returns (pot_window, cur_window, local_peak_idx).
+    """
+    n_pre = peak_idx + 1
+    if n_pre < 15:
+        return potential[:n_pre], smoothed[:n_pre], peak_idx
+
+    pot_range = abs(potential[0] - potential[peak_idx])
+    if pot_range <= max_v:
+        return potential[:n_pre], smoothed[:n_pre], peak_idx
+
+    # Find the first index within max_v of the peak
+    distances = np.abs(potential[:n_pre] - potential[peak_idx])
+    within = distances <= max_v
+    first = int(np.argmax(within))
+
+    # Ensure at least 15 points
+    if n_pre - first < 15:
+        first = max(0, n_pre - 15)
+
+    local_pk = peak_idx - first
+    return potential[first:n_pre], smoothed[first:n_pre], local_pk
+
+
+# ---------------------------------------------------------------------------
 # Onset potential
 # ---------------------------------------------------------------------------
 
@@ -103,8 +137,13 @@ def _compute_onset_potential(potential, smoothed, peak_idx):
     1. Fit a baseline tangent to the flat region before the peak.
     2. Fit a slope tangent to the steepest rising part of the peak.
     3. The intersection of these two lines is the onset potential.
+
+    Works for both anodic (increasing potential) and cathodic (decreasing
+    potential) segments — for cathodic peaks the caller passes -smoothed
+    so the peak appears as a maximum, and the pre-peak region (indices
+    0..peak_idx) corresponds to more-positive potentials (right side on
+    the CV plot).
     """
-    # We only look at the ascending side (indices 0 .. peak_idx)
     pre = smoothed[:peak_idx + 1]
     pot = potential[:peak_idx + 1]
 
@@ -118,22 +157,18 @@ def _compute_onset_potential(potential, smoothed, peak_idx):
     base_coeffs = np.polyfit(base_pot, base_cur, 1)  # [slope, intercept]
 
     # --- slope tangent: fit at the inflection point of the rising edge -----
-    # Compute first derivative dI/dE
     dI = np.gradient(pre, pot)
-    # Smooth the derivative
     dI_smooth = _adaptive_smooth(dI, len(dI))
 
-    # The steepest point is where |dI/dE| is maximum in the rising region
-    # (use second half of the pre-peak data to avoid baseline region)
+    # Search in the second half of the pre-peak data for the steepest point
     half = max(len(dI_smooth) // 2, 1)
     search_region = dI_smooth[half:]
     inflection_local = np.argmax(np.abs(search_region))
     inflection_idx = half + inflection_local
 
-    # Fit a tangent at the inflection point using ±5 surrounding points
     margin = min(5, inflection_idx, len(pre) - inflection_idx - 1)
     if margin < 2:
-        return potential[0]  # fallback
+        return _onset_threshold_fallback(pot, pre, base_coeffs, peak_idx)
 
     tang_pot = pot[inflection_idx - margin : inflection_idx + margin + 1]
     tang_cur = pre[inflection_idx - margin : inflection_idx + margin + 1]
@@ -143,24 +178,39 @@ def _compute_onset_potential(potential, smoothed, peak_idx):
     a1, b1 = base_coeffs
     a2, b2 = tang_coeffs
     if abs(a2 - a1) < 1e-12:
-        return potential[0]  # parallel lines, fallback
+        return _onset_threshold_fallback(pot, pre, base_coeffs, peak_idx)
 
     e_onset = (b1 - b2) / (a2 - a1)
 
-    # Sanity: onset must lie between segment start and peak potential
+    # Sanity: onset must lie within the pre-peak window
     e_min = min(pot[0], pot[-1])
     e_max = max(pot[0], pot[-1])
     if not (e_min <= e_onset <= e_max):
-        # Fallback: use the 10% net-current crossing
-        net = pre - np.polyval(base_coeffs, pot)
-        threshold = net[peak_idx] * 0.10
-        crossings = np.where(net >= threshold)[0]
-        if len(crossings):
-            e_onset = pot[crossings[0]]
-        else:
-            e_onset = pot[0]
+        return _onset_threshold_fallback(pot, pre, base_coeffs, peak_idx)
 
     return float(e_onset)
+
+
+def _onset_threshold_fallback(pot, pre, base_coeffs, peak_idx):
+    """Fallback: find where net current first crosses 10% of peak height."""
+    net = pre - np.polyval(base_coeffs, pot)
+    peak_net = net[-1]  # net current at the peak
+    if abs(peak_net) < 1e-12:
+        return float(pot[0])
+    threshold = peak_net * 0.10
+    # Find sign-change crossings of (net - threshold)
+    diff = net - threshold
+    crossings = np.where(np.diff(np.sign(diff)))[0]
+    if len(crossings):
+        return float(pot[crossings[0]])
+    # Last resort: first point exceeding threshold
+    if peak_net > 0:
+        above = np.where(net >= threshold)[0]
+    else:
+        above = np.where(net <= threshold)[0]
+    if len(above):
+        return float(pot[above[0]])
+    return float(pot[0])
 
 
 # ---------------------------------------------------------------------------
@@ -203,13 +253,11 @@ def _compute_half_peak_potential(potential, smoothed, peak_idx):
     diff = net - half_level
     crossings = np.where(np.diff(np.sign(diff)))[0]
     if len(crossings) == 0:
-        # Fallback: closest point
         closest = np.argmin(np.abs(diff))
         return float(potential[closest])
 
     # Use the last crossing (closest to peak)
     ci = crossings[-1]
-    # Linear interpolation between ci and ci+1
     d0, d1 = diff[ci], diff[ci + 1]
     if abs(d1 - d0) > 1e-15:
         frac = -d0 / (d1 - d0)
@@ -219,77 +267,116 @@ def _compute_half_peak_potential(potential, smoothed, peak_idx):
     return float(ep2)
 
 
-def _detect_peaks_in_segment(potential, current, direction,
-                             min_prominence_frac=0.02):
+def _detect_peaks_in_segment(potential, current, direction, global_range,
+                             min_prominence_frac=0.05, max_peaks=3):
     """Detect peaks in one monotonic segment.
 
     For anodic segments (E increasing) we look for current maxima (oxidation).
     For cathodic segments (E decreasing) we look for current minima (reduction).
 
-    Returns list of dicts with peak info.
+    Uses *global_range* (peak-to-peak of the entire CV current) for
+    the minimum prominence threshold so that only peaks significant on the
+    full-CV scale are retained.
+
+    Returns at most *max_peaks* results, sorted by prominence.
     """
     n = len(current)
     smoothed = _adaptive_smooth(current, n)
-    current_range = np.ptp(smoothed)
-    if current_range == 0:
+
+    if global_range == 0:
         return []
 
-    min_prom = current_range * min_prominence_frac
-    min_dist = max(n // 20, 3)
-
-    results = []
-
-    # Midpoint filter: anodic peaks must be above, cathodic below.
-    midpoint = (np.max(smoothed) + np.min(smoothed)) / 2
+    segment_range = np.ptp(smoothed)
+    # Use the smaller of 10 % segment-range and 5 % global-range so that
+    # real peaks in a small segment aren't overshadowed by a large signal
+    # elsewhere (e.g. oxidation near solvent window while reduction dominates
+    # the global range).
+    min_prom = min(segment_range * 0.10, global_range * min_prominence_frac)
+    # … but never below 1.5 % of global range (safety floor against noise)
+    min_prom = max(min_prom, global_range * 0.015)
+    min_dist = max(n // 15, 5)
+    # Require peaks to span at least a few data points (scale with resolution)
+    min_width = max(n // 100, 2)
 
     if direction == "anodic":
-        idx, props = find_peaks(smoothed, prominence=min_prom, distance=min_dist)
-        if len(idx) == 0:
-            return []
-        for i, pk in enumerate(idx):
-            if pk < n * 0.03 or pk > n * 0.97:
-                continue
-            if smoothed[pk] < midpoint:
-                continue
-            ep2 = _compute_half_peak_potential(potential, smoothed, pk)
-            onset = _compute_onset_potential(potential, smoothed, pk)
-            # Net current from proper baseline
-            base_coeffs = _fit_pre_peak_baseline(potential, smoothed, pk)
-            ip_net = smoothed[pk] - np.polyval(base_coeffs, potential[pk])
-            results.append(dict(
-                peak_type="anodic",
-                potential=potential[pk],
-                current=current[pk],
-                net_current=abs(ip_net),
-                half_peak_potential=ep2,
-                onset_potential=onset,
-            ))
+        signal = smoothed
+        peak_type = "anodic"
     else:
-        # Cathodic: find minima by inverting signal
-        neg_smoothed = -smoothed
-        idx, props = find_peaks(neg_smoothed, prominence=min_prom, distance=min_dist)
-        if len(idx) == 0:
-            return []
-        for i, pk in enumerate(idx):
-            if pk < n * 0.03 or pk > n * 0.97:
-                continue
-            if smoothed[pk] > midpoint:
-                continue
-            # Use -smoothed so the same baseline logic applies (looking at a maximum)
-            ep2 = _compute_half_peak_potential(potential, neg_smoothed, pk)
-            onset = _compute_onset_potential(potential, neg_smoothed, pk)
-            base_coeffs = _fit_pre_peak_baseline(potential, neg_smoothed, pk)
-            ip_net = neg_smoothed[pk] - np.polyval(base_coeffs, potential[pk])
-            results.append(dict(
-                peak_type="cathodic",
-                potential=potential[pk],
-                current=current[pk],
-                net_current=abs(ip_net),
-                half_peak_potential=ep2,
-                onset_potential=onset,
-            ))
+        signal = -smoothed
+        peak_type = "cathodic"
+
+    idx, props = find_peaks(signal, prominence=min_prom, distance=min_dist,
+                            width=min_width)
+    if len(idx) == 0:
+        return []
+
+    # Sort by prominence descending and keep only top candidates
+    prominences = props["prominences"]
+    order = np.argsort(-prominences)
+    idx = idx[order]
+    prominences = prominences[order]
+
+    results = []
+    for i in range(len(idx)):
+        pk = int(idx[i])
+
+        # Skip peaks too close to segment endpoints (vertex artifacts).
+        # Use a small index guard plus asymmetric voltage margins:
+        #   - 200 mV at the segment START (scan just reversed, transient)
+        #   - 100 mV at the segment END
+        if pk < max(int(n * 0.02), 2) or pk > n - max(int(n * 0.02), 2) - 1:
+            continue
+        if abs(potential[pk] - potential[0]) < 0.200:
+            continue
+        if abs(potential[pk] - potential[-1]) < 0.100:
+            continue
+
+        # Use a local window (~1 V) for onset and Ep/2 so that
+        # baseline fits stay close to the actual peak.
+        w_pot, w_cur, w_pk = _local_pre_peak_window(potential, signal, pk)
+
+        ep2 = _compute_half_peak_potential(w_pot, w_cur, w_pk)
+        onset = _compute_onset_potential(w_pot, w_cur, w_pk)
+
+        results.append(dict(
+            peak_type=peak_type,
+            potential=potential[pk],
+            current=current[pk],
+            net_current=float(prominences[i]),
+            half_peak_potential=ep2,
+            onset_potential=onset,
+        ))
+
+        if len(results) >= max_peaks:
+            break
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Deduplication
+# ---------------------------------------------------------------------------
+
+def _deduplicate_peaks(peaks, min_separation=0.100):
+    """Remove peaks that are closer than *min_separation* V.
+
+    When two peaks are too close, keep the one with the higher prominence
+    (net_current).
+    """
+    if len(peaks) <= 1:
+        return peaks
+
+    # Sort by potential
+    peaks_sorted = sorted(peaks, key=lambda p: p.potential)
+    kept = [peaks_sorted[0]]
+    for pk in peaks_sorted[1:]:
+        if abs(pk.potential - kept[-1].potential) < min_separation:
+            # Keep the more prominent one
+            if abs(pk.net_current) > abs(kept[-1].net_current):
+                kept[-1] = pk
+        else:
+            kept.append(pk)
+    return kept
 
 
 # ---------------------------------------------------------------------------
@@ -361,12 +448,16 @@ def analyze_cv(potential, current,
             np.asarray(blank_current, dtype=float),
         )
 
+    # Compute global scale for prominence thresholding
+    global_range = np.ptp(current)
+
     segments = split_segments(potential, current)
 
     all_peaks: List[CVPeak] = []
     for seg_idx, seg in enumerate(segments):
         raw = _detect_peaks_in_segment(
             seg["potential"], seg["current"], seg["direction"],
+            global_range,
         )
         for r in raw:
             all_peaks.append(CVPeak(
@@ -379,21 +470,15 @@ def analyze_cv(potential, current,
                 segment_index=seg_idx,
             ))
 
-    # Global noise filter: discard peaks that are insignificant on the
-    # full CV scale.  Two checks:
-    #   1. net_current (from baseline fit) >= 2 % of full current range
-    #   2. |raw peak current| >= 2 % of maximum absolute current
-    # The second check catches cases where a bad baseline extrapolation
-    # inflates the net_current of a tiny artefact.
-    global_range = np.ptp(current)
-    max_abs_current = max(abs(np.max(current)), abs(np.min(current)))
+    # Filter out peaks where the raw current is negligible compared to
+    # the global CV scale (catches inflated-prominence artefacts).
+    max_abs_current = max(abs(np.max(current)), abs(np.min(current)), 1e-12)
     if global_range > 0:
-        min_net = 0.02 * global_range
-        min_abs = 0.02 * max_abs_current
-        all_peaks = [
-            p for p in all_peaks
-            if abs(p.net_current) >= min_net and abs(p.current) >= min_abs
-        ]
+        min_abs = 0.03 * max_abs_current
+        all_peaks = [p for p in all_peaks if abs(p.current) >= min_abs]
+
+    # Remove near-duplicate peaks (within 100 mV)
+    all_peaks = _deduplicate_peaks(all_peaks)
 
     pairs = _match_reversible_pairs(all_peaks)
     is_reversible = len(pairs) > 0
