@@ -379,14 +379,20 @@ def analyze_cv(potential, current,
                 segment_index=seg_idx,
             ))
 
-    # Global noise filter: discard peaks whose prominence is < 2% of the
-    # full CV current range.  This removes tiny artefacts that pass the
-    # per-segment threshold but are clearly noise on the global scale.
+    # Global noise filter: discard peaks that are insignificant on the
+    # full CV scale.  Two checks:
+    #   1. net_current (from baseline fit) >= 2 % of full current range
+    #   2. |raw peak current| >= 2 % of maximum absolute current
+    # The second check catches cases where a bad baseline extrapolation
+    # inflates the net_current of a tiny artefact.
     global_range = np.ptp(current)
+    max_abs_current = max(abs(np.max(current)), abs(np.min(current)))
     if global_range > 0:
+        min_net = 0.02 * global_range
+        min_abs = 0.02 * max_abs_current
         all_peaks = [
             p for p in all_peaks
-            if abs(p.net_current) >= 0.02 * global_range
+            if abs(p.net_current) >= min_net and abs(p.current) >= min_abs
         ]
 
     pairs = _match_reversible_pairs(all_peaks)
